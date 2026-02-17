@@ -1,23 +1,17 @@
-# Production Dockerfile for Next.js frontend
-FROM node:20-slim as base
+FROM node:20-slim
 
-# Set working directory
 WORKDIR /app
 
-# Install dependencies first for better caching
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm install --production=false
+# Install dependencies
+COPY package.json package-lock.json* ./
+RUN npm install
 
-# Copy the rest of the frontend source
-COPY frontend/ ./
+# Copy app source
+COPY . .
 
-# Build the Next.js app
+# Build app
 RUN npm run build
 
-# Expose Next.js port
 EXPOSE 3000
-
-# Run in production mode
-ENV NODE_ENV=production
 
 CMD ["npm", "start"]
