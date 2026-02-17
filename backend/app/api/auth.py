@@ -35,6 +35,7 @@ class RegisterRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+    user: UserResponse
 
 
 class UserResponse(BaseModel):
@@ -93,9 +94,18 @@ def register(user_in: RegisterRequest, session: Session = Depends(get_session)):
         email=user_in.email,
         password_hash=get_password_hash(user_in.password),
     )
-    session.add(user)
-    session.commit()
-    session.refresh(user)
+    
+    try:
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+    except Exception as e:
+        session.rollback()
+        print(f"[AUTH] Registration error: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create user: {str(e)[:100]}"
+        )
 
     return UserResponse(id=user.id, email=user.email)
 
@@ -114,8 +124,21 @@ def login(
     password = form_data.password
 
     user = session.exec(select(User).where(User.email == email)).first()
-    if not user or not verify_password(password, user.password_hash):
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    # Verify password while session is still active (access user.password_hash within session scope)
+    try:
+        password_valid = verify_password(password, user.password_hash)
+    except Exception as e:
+        print(f"[AUTH] Password verification error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    
+    if not password_valid:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     access_token = create_access_token({"sub": str(user.id)})
-    return TokenResponse(access_token=access_token)
+    return TokenResponse(
+        access_token=access_token,
+        user=UserResponse(id=user.id, email=user.email)
+    )

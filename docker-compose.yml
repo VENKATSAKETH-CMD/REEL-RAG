@@ -1,0 +1,50 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: reels
+      POSTGRES_USER: reelsuser
+      POSTGRES_PASSWORD: reelspass
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  backend:
+    build:
+      context: ./backend
+    depends_on:
+      - postgres
+    environment:
+      - DATABASE_URL=postgresql+psycopg://reelsuser:reelspass@postgres:5432/reels
+      - ASR_MODE=openai
+      - EMBED_MODE=openai
+      # Add other env vars as needed, or use env_file below
+    env_file:
+      - ./backend/.env
+    ports:
+      - "8000:8000"
+    networks:
+      - appnet
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      - backend
+    environment:
+      - NEXT_PUBLIC_API_BASE_URL=http://backend:8000
+    ports:
+      - "3000:3000"
+    networks:
+      - appnet
+
+volumes:
+  pgdata:
+
+networks:
+  appnet:
+    driver: bridge

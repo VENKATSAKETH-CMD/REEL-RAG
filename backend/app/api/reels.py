@@ -19,10 +19,10 @@ from app.workers.tasks import transcribe_and_index_reel
 from app.services.rag import answer_reel_question
 from app.schemas.reels import ReelChatRequest, ReelChatResponse
 
+# Import the helper function to convert paths to HTTP URLs
+from app.utils import get_public_video_url
+
 router = APIRouter()
-
-
-# `ReelChatRequest` and `ReelChatResponse` are defined in `app.schemas.reels`
 
 
 @router.post("/reels", response_model=dict)
@@ -66,7 +66,7 @@ async def upload_reel(
     return {
         "id": reel.id,
         "user_id": reel.user_id,
-        "video_url": reel.video_url,
+        "video_url": get_public_video_url(reel.video_url),
         "title": reel.title,
         "status": reel.status,
         "created_at": reel.created_at,
@@ -74,31 +74,118 @@ async def upload_reel(
 
 
 @router.post("/reels/{reel_id}/chat", response_model=ReelChatResponse)
-def chat_reel(
+async def chat_reel(
     reel_id: int,
     payload: ReelChatRequest,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    # 1. Load the reel
+    """
+    Answer a question about a reel using RAG (Retrieval-Augmented Generation).
+    
+    Hardened for reliability:
+    - Validates input message length
+    - Checks reel exists and belongs to user
+    - Ensures reel is ready before processing
+    - Handles all exceptions gracefully with safe fallback responses
+    - Never crashes; always returns a valid response or clear error
+    
+    Args:
+        reel_id: ID of the reel to ask about
+        payload: ChatRequest with 'message' field (string, max 2000 chars)
+        session: Database session
+        current_user: Authenticated user
+    
+    Returns:
+        ChatResponse with 'answer' field (string)
+    
+    Raises:
+        HTTPException: For validation failures (404, 403, 400)
+    """
+    # --- VALIDATION ---
+    
+    # 1. Validate message length
+    MAX_MESSAGE_LENGTH = 2000
+    message = payload.message.strip()
+    
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message cannot be empty"
+        )
+    
+    if len(message) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Message exceeds maximum length of {MAX_MESSAGE_LENGTH} characters"
+        )
+    
+    # 2. Load the reel
     reel = session.get(Reel, reel_id)
     if not reel:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reel not found")
-
-    # 2. Access control: owner only
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Reel not found"
+        )
+    
+    # 3. Access control: owner only
     if reel.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this reel")
-
-    # 3. Check status
-    if reel.status != "ready":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reel is not ready for chat yet. Try again later.")
-
-    # 4. Answer question
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authorized to access this reel"
+        )
+    
+    # 4. Check reel is ready
+    if reel.status == "uploaded":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reel is queued for processing. Try again in a few moments."
+        )
+    elif reel.status == "processing":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reel is still being processed. Try again in a few moments."
+        )
+    elif reel.status == "failed":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Reel failed to process. Please try uploading again."
+        )
+    elif reel.status != "ready":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Reel is not ready (status: {reel.status}). Try again later."
+        )
+    
+    # --- ANSWER GENERATION (with graceful fallbacks) ---
+    
     try:
-        answer = answer_reel_question(session=session, reel=reel, user_message=payload.message)
+        answer = answer_reel_question(session=session, reel=reel, user_message=message)
     except RuntimeError as e:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
-
+        # Configuration and API errors caught here
+        error_msg = str(e)
+        print(f"[CHAT] RuntimeError for reel {reel_id}: {error_msg}")
+        
+        # Map specific error types to user-safe messages
+        if "OPENAI_API_KEY" in error_msg:
+            answer = "Chat is temporarily unavailable due to missing API configuration. Please contact support."
+        elif "rate limited" in error_msg.lower() or "quota exceeded" in error_msg.lower():
+            answer = "AI responses are temporarily limited. Please try again in a few moments."
+        elif "authentication failed" in error_msg.lower() or "api key" in error_msg.lower():
+            answer = "Chat authentication error. Please contact support."
+        elif "model not found" in error_msg.lower():
+            answer = "AI model is currently unavailable. Please try again later."
+        elif "PostgreSQL" in error_msg or "pgvector" in error_msg:
+            answer = "Chat requires a properly configured database. Please contact support."
+        else:
+            # Generic fallback for other RuntimeErrors
+            answer = "I encountered an issue while processing your question. Please try again later."
+    except Exception as e:
+        # Unexpected errors during RAG retrieval or generation
+        # Log but return safe fallback instead of crashing
+        print(f"[CHAT] Unexpected error for reel {reel_id}: {type(e).__name__}: {e}")
+        answer = "I encountered an unexpected error while processing your question. Please try again later."
+    
     return ReelChatResponse(answer=answer)
 
 
@@ -127,7 +214,7 @@ def list_reels(
         {
             "id": r.id,
             "user_id": r.user_id,
-            "video_url": r.video_url,
+            "video_url": get_public_video_url(r.video_url),
             "title": r.title,
             "status": r.status,
             "created_at": r.created_at,
@@ -155,7 +242,7 @@ def get_reel(
     return {
         "id": reel.id,
         "user_id": reel.user_id,
-        "video_url": reel.video_url,
+        "video_url": get_public_video_url(reel.video_url),
         "title": reel.title,
         "status": reel.status,
         "created_at": reel.created_at,

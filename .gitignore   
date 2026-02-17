@@ -1,0 +1,21 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Environment
+.env
+backend/.env
+
+# VS Code
+.vscode/
+
+# Uploaded data / videos
+backend/data/uploads/
+
+# Logs
+*.log
+
